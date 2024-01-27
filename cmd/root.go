@@ -5,7 +5,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/artemvang/kensen/internal"
+	kensen "github.com/artemvang/kensen/internal"
 	"github.com/spf13/cobra"
 	"github.com/spf13/pflag"
 	"github.com/spf13/viper"
@@ -72,8 +72,10 @@ var applyCmd = &cobra.Command{
 			return err
 		}
 		for _, mig := range migrationStatuses {
-			fmt.Printf("%s - %s", mig.Migration, mig.Status.String())
-			return mig.Err
+			fmt.Printf("%s - %s\n", mig.Migration, mig.Status.String())
+			if mig.Err != nil {
+				return mig.Err
+			}
 		}
 
 		return nil

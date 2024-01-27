@@ -4,9 +4,11 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
+	"github.com/BurntSushi/toml"
 	"github.com/artemvang/kensen/internal/engines"
 )
 
@@ -40,6 +42,10 @@ type MigrationStatus struct {
 type Kensen struct {
 	engine         engines.Engine
 	migrationsPath string
+}
+
+type MigrationMeta struct {
+	Dependencies []string
 }
 
 const migrationsTable string = "kensen"
@@ -126,17 +132,35 @@ func (k *Kensen) getAvailable() ([]string, error) {
 		return nil, err
 	}
 
-	migrations := make([]string, 0)
+	migrations := make(map[string][]string)
 
 	for _, f := range files {
 		name := f.Name()
 		if f.IsDir() || !strings.HasSuffix(name, ".sql") {
 			continue
 		}
-		migrations = append(migrations, strings.TrimSuffix(name, ".sql"))
+
+		sql, err := os.ReadFile(filepath.Join(k.migrationsPath, name))
+		if err != nil {
+			return nil, err
+		}
+		sqlString := string(sql)
+		meta, err := extractMeta(sqlString)
+		if err != nil {
+			return nil, err
+		}
+
+		if meta != nil && len(meta.Dependencies) > 0 {
+			migrations[strings.TrimSuffix(name, ".sql")] = meta.Dependencies
+		} else {
+			migrations[strings.TrimSuffix(name, ".sql")] = make([]string, 0)
+		}
 	}
 
-	return migrations, nil
+	sortedMigrations := topologicalSort(migrations)
+	slices.Reverse(sortedMigrations)
+
+	return sortedMigrations, nil
 }
 
 func (k *Kensen) applyMigration(migration string) MigrationStatus {
@@ -172,6 +196,7 @@ func (k *Kensen) Apply() ([]MigrationStatus, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	applied, err := k.getApplied()
 
 	if err != nil {
@@ -183,17 +208,51 @@ func (k *Kensen) Apply() ([]MigrationStatus, error) {
 		appliedSet[mig] = true
 	}
 
-	migrationStatuses := make([]MigrationStatus, len(available))
-	for i, migration := range available {
+	migrationStatuses := make([]MigrationStatus, 0)
+	for _, migration := range available {
 		if _, ok := appliedSet[migration]; ok {
-			migrationStatuses[i] = MigrationStatus{migration, Skipped, nil}
+			migrationStatuses = append(migrationStatuses, MigrationStatus{migration, Skipped, nil})
 			continue
 		}
 
-		migrationStatuses[i] = k.applyMigration(migration)
-		if migrationStatuses[i].Status == Errored {
+		status := k.applyMigration(migration)
+		migrationStatuses = append(migrationStatuses, status)
+		if status.Status == Errored {
 			break
 		}
 	}
 	return migrationStatuses, nil
+}
+
+func extractMeta(sql string) (*MigrationMeta, error) {
+	lines := make([]string, 0)
+	for i, line := range strings.Split(sql, "\n") {
+		if i == 0 {
+			if strings.HasPrefix(line, "/*") {
+				line = strings.TrimSpace(strings.TrimPrefix(line, "/*"))
+				lines = append(lines, line)
+			} else {
+				return &MigrationMeta{make([]string, 0)}, nil
+			}
+		} else {
+			if strings.HasSuffix(line, "*/") {
+				line = strings.TrimSpace(strings.TrimPrefix(line, "*/"))
+				lines = append(lines, line)
+				break
+			} else {
+				line = strings.TrimSpace(strings.TrimPrefix(line, "*/"))
+				lines = append(lines, line)
+			}
+		}
+	}
+
+	data := strings.TrimSpace(strings.Join(lines, "\n"))
+
+	var meta MigrationMeta
+	_, err := toml.Decode(data, &meta)
+	if err != nil {
+		return nil, err
+	}
+
+	return &meta, nil
 }
